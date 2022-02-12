@@ -1,0 +1,311 @@
+
+label var id "patient id"
+label var muscle "muscle type"
+label var position "position on the leg"
+label var leg "side"
+label define muscle 1 "RF" 2 "VI"
+label values muscle muscle
+label define position 1 "proximal" 2 "distal"
+label values position position
+label define leg 1 "right" 2 "left"
+label values leg leg
+label var us "Ultrasound"
+label var ct "CT scan"
+sort id muscle position leg
+
+recode muscle 1=0 2=1
+recode leg 1=0 2=1
+recode position 1=0 2=1
+
+
+*-------------------------------------------------------------------------------
+**# Start bivariate mixed effect model via SEM
+*-------------------------------------------------------------------------------
+/*
+A bivariate mixed model to joint CT and US
+data using the Stata program gsem with patients included
+as random effects, in order to estimate the differences in
+muscle thickness between muscle types (VI vs RF), different
+positions (distal vs proximal) and different sides (left
+vs right). 
+According to the model there are two kinds of error 
+(i.e. two causes of random variation
+about the population average at each measurement site) namely,
+measurement error (i.e. intra-patient variability) "e" and,
+error due to inter-patient variability
+*/
+
+gsem   ///
+	(muscle -> ct, family(gaussian) link(identity)) ///
+	(muscle -> us, family(gaussian) link(identity)) ///
+	(position -> ct, family(gaussian) link(identity)) ///
+	(position -> us, family(gaussian) link(identity)) ////
+	(leg -> ct, family(gaussian) link(identity)) ///
+	(leg -> us, family(gaussian) link(identity)) ///
+	(P[id] -> ct, family(gaussian) link(identity)) ///
+	(P[id] -> us, family(gaussian) link(identity)) ///
+	, covstruct(_lexogenous, diagonal) latent(P ) nocapslatent
+
+summ us, meanonly
+local mm_us = r(mean)
+summ ct, meanonly
+local mm_ct = r(mean)
+foreach name in ct us  {
+	di _newline(3) in ye "---> CV of  `name' = "  %3.1f  sqrt(_b[/var(e.`name')]) /  `mm_`name''  * 100 "%"
+	di   in ye "---> Intraclass correlation coeff. of  `name' = "  %4.3f  _b[/var(P[id])] / (_b[/var(P[id])] + _b[/var(e.`name')])
+	 }
+	 
+// compare CV with extent of mean differences between CT and US 
+margins, at(position= 1) ///
+	predict(mu outcome(us)) predict(mu outcome(ct)) ///
+	pwcompare(pveffects cieffects) vsquish cformat(%4.3f) sformat(%4.3f) pformat(%4.3f)
+	
+
+
+
+*-------------------------------------------------------------------------------
+**# End bivariate mixed effect model via SEM
+*-------------------------------------------------------------------------------
+
+
+
+*-------------------------------------------------------------------------------
+**# Start quantifying differential and proportional biases between US and CT
+*-------------------------------------------------------------------------------
+
+/*
+Based on methods in Taffe P (2018) Stat Methods Med Res 27(6):1650
+To consistently quantify, for each muscle type and position, the
+amount of differential and proportional biases between US
+and CT (which we displayed as "bias plots") and to compare
+precision between the two methods (which was displayed
+as "precision plots"). These analyses, allowed for heteroscedastic
+measurement errors (i.e. measurement error changing
+with the level of the true -latent- value of muscle thickness).
+
+*/
+
+
+preserve
+*-------------------------------------------------------------------------------
+*   RF, Proximal
+*-------------------------------------------------------------------------------
+keep if muscle==1 & position==1
+biasplot, idvar(id) ynew(us) yref(ct) 
+cap drop t y1 y2
+gen t = leg
+gen y1 = us
+gen y2 = ct
+
+sort id t
+xtset id t
+
+cap drop y1_mean y2_mean
+by id: egen y1_mean =mean(y1)
+by id: egen y2_mean =mean(y2)
+
+mixed y2 || id:
+predict BLUP_x, fitted
+
+qui regress y2 BLUP_x
+predict fit_y2, xb
+label var fit_y2 "Reference standard"
+
+qui regress y2 BLUP_x
+predict res_y2, r
+gen abs_res_y2=abs(res_y2)
+
+cap drop fit1
+qui regress abs_res_y2 BLUP_x
+predict fit1, xb
+gen sig_res_y2= fit1*sqrt(_pi/2)
+
+qui regress y1 BLUP_x, vce(cluster id)
+predict fit_y1 if y1~=., xb
+gen biais=_b[_cons]+BLUP_x*(_b[BLUP_x]-1)
+label var biais "bias"
+global differential_bias=round(_b[_cons], 0.01)
+disp "biais_diff=" $differential_bias
+global proportional_bias=round(_b[BLUP_x], 0.001)
+disp "biais_prop=" $proportional_bias
+
+mat T=r(table)
+scalar diff_bias_lo=T[5,2]
+scalar diff_bias_up=T[6,2]
+n disp "diff_bias=" $differential_bias ", 95%CI=[" diff_bias_lo ";" diff_bias_up "]"
+
+scalar prop_bias_lo=T[5,1]
+scalar prop_bias_up=T[6,1]
+n disp "prop_bias=" $proportional_bias ", 95%CI=[" prop_bias_lo ";" prop_bias_up "]"
+
+predict res_y1 if y1~=., r
+gen abs_res_y1=abs(res_y1) if y1~=.
+
+cap drop fit1
+qui regress abs_res_y1 BLUP_x if y1~=.
+predict fit1 if y1~=., xb
+gen sig_res_y1=fit1*sqrt(_pi/2)
+
+***** bias plot
+
+sort id t
+
+local diff_bias = string($differential_bias, "%3.2f")
+local prop_bias = $proportional_bias*100
+local prop_bias = string(`prop_bias', "%3.1f")
+twoway ///
+scatter y2 BLUP_x, title("Bias plot: RF, Proximal") mcolor(maroon) m(smcircle_hollow) ///
+	xtitle("Muscle Thickness (cm)") xsc(titlegap(3)) ///
+	xlab(0.5(0.5)2.5, format(%3.1f)) || ///
+	lfit fit_y2 BLUP_x, lcolor(maroon) lwidth(medthick) || ///
+	scatter y1 BLUP_x, ytitle("Measurement via US or CT (cm)", size(*.9)) ///
+	mcolor(navy) m(smcircle_hollow) ylab(0.5(0.5)2.5, angle(horizontal) format(%3.1f)) || ///
+	lfit fit_y1 BLUP_x, lwidth(medthick) lpattern(solid) lcolor(navy) || ///
+	lfit biais BLUP_x, yaxis(2) ytitle("Bias (cm)", axis(2) color(black)) ///
+	ylab(-0.25(0.125)0.25, angle(horizontal) format(%4.3f) axis(2)) ysc(titlegap(-0.5)) ///
+	lwidth(medthick) lpattern(dash) lcolor(red) ///
+	yline(0, axis(2) lpattern(dots) lcolor(red)) xlabel(,grid) ///
+	legend( pos(11) cols(1) ring(0) symxsize(10) rowgap(0.5) size(*.7) ///
+	order(1 "CT" 3 "US" 5 "Bias")) ///
+	subtitle(diff. bias = `diff_bias'cm; prop. bias = `prop_bias'%) ///
+	, ///
+	scheme(s1mono) aspectratio(1)
+	graph export bias_plot_rf_prox.png, replace
+
+
+qui regress y1 BLUP_x if y1~=.
+gen y1_corr=(y1-_b[_cons])/_b[BLUP_x]
+
+qui regress y1_corr BLUP_x if y1~=.
+cap drop fit_y1_corr
+predict fit_y1_corr if y1~=., xb
+
+
+qui regress y1_corr BLUP_x if y1~=.
+predict res_y1_corr if y1~=., r
+
+gen abs_res_y1_corr=abs(res_y1_corr) if y1~=.
+qui regress abs_res_y1_corr BLUP_x if y1~=.
+
+cap drop fit1
+predict fit1 if y1~=., xb
+gen sig_res_y1_corr=fit1*sqrt(_pi/2)
+
+***** precision plot
+
+
+tw ///
+scatter sig_res_y2 BLUP_x if t==1, mcolor(maroon) msymbol(smcircle_hollow) ///
+	msize(*1.2) title("Precision plot: RF, Proximal") ///
+	ytitle({&sigma}{subscript:error (cm)}, size(*1.4)) ///
+	xtitle("Muscle Thickness (cm)") xlabel(, format(%3.2f)) xsc(titlegap(2)) || ///
+scatter sig_res_y1_corr BLUP_x if t==1, mcolor(navy) msymbol(smcircle_hollow) ///
+	msize(*1.2) ylabel(0.0(0.1)0.5, angle(horizontal) format(%3.2f) grid) ///
+	legend(pos(2) ring(0) label(1 "Reference standard: CT") ///
+	label(2 "Recalibrated US") cols(1)) ///
+	, ///
+	scheme(s1mono)
+graph export prec_plot_rf_prox.png, replace
+
+restore
+
+	
+///////////////////////////////////////////////////////////////////////////////
+preserve
+gen d= us - ct
+/* calculations in
+Bland, J. Martin and Altman, Douglas G. (2007) Agreement between methods of 
+measurement with multiple observations per individual. 
+Journal of Biopharmaceutical Statistics, 17 (4). 571-582.
+*/
+cap drop N n N2 sum_mi_sq sum_mi
+bysort id: gen N=_N
+bysort id: gen n=_n
+qui replace N=. if n!=1
+qui gen N2= N^2
+egen sum_mi_sq = sum(N2)
+egen sum_mi = sum(N)
+count
+local sum_sq_mi =r(N)^2
+local sum_mi_sq = sum_mi_sq[1]
+qui inspect id
+local n_m1 =r(N_unique)-1
+local sum_mi = sum_mi[1]
+local divisor = (`sum_sq_mi' - `sum_mi_sq')/`n_m1'/`sum_mi'
+di %4.3f `divisor'
+loneway d id 
+local var_b = (.11853163-.01826269)/`divisor'
+di "var(_cons): " %4.3f `var_b'
+/*
+Calculations using saved results from loneway
+*/
+qui loneway d id 
+local sd_w = r(sd_w)
+local sd_b = r(sd_b)
+di "var(Residual): " %4.3f `sd_w'^2 _skip(1) "var(_cons): " %4.3f `sd_b'^2
+/*
+Calculation using mixed wich accounts for fixed effects
+*/
+qui mixed d i.muscle i.position ||id:, reml
+estat sd
+matrix b =r(b)
+local sd_w = el(b,1,7)
+local sd_b = el(b,1,6)
+di "var(Residual): " %4.3f `sd_w'^2 _skip(1) "var(_cons): " %4.3f `sd_b'^2
+drop d
+
+bysort id muscle position: egen m_us=mean(us)
+bysort id muscle position: egen m_ct=mean(ct)
+
+
+gen d= us - ct
+centile d, c(2.5 97.5)
+summ d, detail
+qui summ d
+gen db = r(mean)
+local db = r(mean)
+
+di sqrt( `sd_w'^2+ `sd_b'^2)
+local dsd= sqrt(`sd_w'^2+ `sd_b'^2)
+di %4.3f `dsd'
+gen dll = db - invnorm(0.975) * `dsd'
+gen dul = db + invnorm(0.975) * `dsd'
+local dll_pos = `db' - invnorm(0.975) * `dsd'
+local dul_pos = `db' + invnorm(0.975) * `dsd'
+local dll_str = string(`dll_pos', "%3.2f")
+local dul_str = string(`dul_pos', "%3.2f")
+gen m = (us + ct)/2
+qui regress d m if leg==2
+predict yhat
+qui summ yhat
+sort yhat
+replace yhat=. if _n>1 & _n<r(N)
+
+                graph twoway line dll db dul m , ///
+                clcolor(black red black) clpatter(solid dash solid) sort  ///
+                || scatter d m if muscle==1 & position==1, ms(oh) mcolor(maroon)   ///
+				|| scatter d m if muscle==1 & position==2, ms(th) mcolor(maroon)   ///
+				|| scatter d m if muscle==2 & position==1, ms(o) mcolor(navy)  mfcolor(%30)  ///
+				|| scatter d m if muscle==2 & position==2, ms(t) mcolor(navy)  mfcolor(%30) ///
+				|| line yhat m, lpattern(dash) lcolor(red) lwidth(*1) ///
+				yline(0, lpattern(solid) lcolor(black)) ///
+                yti("Difference of US and CT (cm)")  ///
+                xti("Mean of US and CT (cm)")       ///
+				xscale(range(0.2 2.8) titlegap(2)) xlab(0.5(0.5)2.5, format(%3.2f)) ///
+				ylab(-0.75(0.25)0.75, angle(horzontal) format(%3.2f) grid) ///
+				yscale(range(-0.75 0.75) titlegap(3)) ///
+                legend(order(4 "RF,Prox" 5 "RF,Dist" 6 "VI,Prox" 7 "VI,Dist" ///
+				) ) legend(position(6) cols(4) ) ///
+				text(`dul_pos' 0.25 "+`dul_str'", size(*0.8)) ///
+				text(`dll_pos' 0.25 "`dll_str'", size(*0.8)) ///
+				scheme(s1mono) 
+restore				
+cap graph export alice_bland_altman_2019.png, replace 	
+
+exit	
+
+*-------------------------------------------------------------------------------
+**# End quantifying differential and proportional biases between US and CT
+*-------------------------------------------------------------------------------	
+
+
